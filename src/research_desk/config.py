@@ -108,6 +108,15 @@ class Settings(BaseSettings):
     discovery_retry_delay_seconds: float = 1.5
     peer_request_timeout_seconds: float = 180.0
 
+    # --- Security ---
+    # Unset means the demo runs open, which is what makes `git clone && run`
+    # work. Setting it turns on the API-key scheme declared in every agent card.
+    a2a_api_key: str | None = None
+
+    # --- Telemetry ---
+    telemetry_enabled: bool = False
+    otel_exporter_endpoint: str = "http://127.0.0.1:4318"
+
     # --- Logging ---
     log_level: str = "INFO"
     log_format: str = "console"
@@ -130,6 +139,10 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [item.strip().rstrip("/") for item in value.split(",") if item.strip()]
         return value
+
+    @property
+    def auth_enabled(self) -> bool:
+        return bool(self.a2a_api_key)
 
     @property
     def groq_api_keys(self) -> list[str]:

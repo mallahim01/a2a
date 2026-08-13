@@ -5,10 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-from a2a.client import ClientConfig, ClientFactory
+from a2a.client import AuthInterceptor, ClientConfig, ClientFactory
 from a2a.helpers import get_artifact_text, get_data_parts
 from a2a.types import a2a_pb2
 from a2a.utils.constants import VERSION_HEADER
+
+from research_desk.protocol.auth import StaticApiKeyCredentials
 
 PROTOCOL_VERSION = "1.0"
 
@@ -48,9 +50,13 @@ async def send_message(
     *,
     task_id: str = "",
     context_id: str = "",
+    api_key: str = "",
 ) -> a2a_pb2.Task:
     """Send a message with the SDK client and return the final task."""
-    a2a_client = ClientFactory(ClientConfig(streaming=False, httpx_client=client)).create(card)
+    interceptors = [AuthInterceptor(StaticApiKeyCredentials(api_key))] if api_key else None
+    a2a_client = ClientFactory(ClientConfig(streaming=False, httpx_client=client)).create(
+        card, interceptors=interceptors
+    )
     message = a2a_pb2.Message(
         message_id=f"test-{abs(hash((text, task_id))):x}",
         role=a2a_pb2.ROLE_USER,

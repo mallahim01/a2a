@@ -1,18 +1,20 @@
 """Assembles a runnable A2A server around an agent executor.
 
 The SDK supplies the protocol routes; this module wires them into a Starlette
-application and adds the two operational endpoints the demo needs (``/health``
-and, for the coordinator, ``/agents``).
+application and adds the operational endpoints the demo needs.
 
 Routes exposed by every agent:
 
-===========================  ======  ==================================
-Path                         Method  Purpose
-===========================  ======  ==================================
-``/``                        POST    A2A JSON-RPC (SendMessage, GetTask…)
-``/.well-known/agent-card``  GET     Agent card — discovery
-``/health``                  GET     Liveness for Docker and humans
-===========================  ======  ==================================
+===============================  ======  ====================================
+Path                             Method  Purpose
+===============================  ======  ====================================
+``/``                            POST    A2A JSON-RPC (SendMessage, GetTask…)
+``/.well-known/agent-card.json`` GET     Agent card — discovery
+``/health``                      GET     Liveness for Docker and humans
+===============================  ======  ====================================
+
+Only the JSON-RPC route is guarded when authentication is enabled: discovery and
+health must work before a caller knows what credential to present.
 """
 
 from __future__ import annotations
@@ -30,10 +32,11 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
+from starlette.types import ASGIApp
 
 from research_desk import __version__
-
-Lifespan = Callable[[Starlette], Any]
+from research_desk.protocol.auth import ApiKeyAuthMiddleware
+from research_desk.telemetry import instrument_app
 
 
 def build_app(
@@ -43,7 +46,9 @@ def build_app(
     extra_routes: list[Route] | None = None,
     on_startup: Callable[[], Any] | None = None,
     on_shutdown: Callable[[], Any] | None = None,
-) -> Starlette:
+    api_key: str | None = None,
+    tracing_enabled: bool = False,
+) -> ASGIApp:
     """Build the ASGI application for one agent.
 
     Task state is kept in :class:`InMemoryTaskStore`: fine for a demo, and the
@@ -63,6 +68,7 @@ def build_app(
                 "version": __version__,
                 "protocol_version": card.supported_interfaces[0].protocol_version,
                 "skills": [skill.id for skill in card.skills],
+                "auth_required": bool(api_key),
             }
         )
 
@@ -83,4 +89,9 @@ def build_app(
         # The JSON-RPC route is mounted on "/" and matches greedily, so it goes last.
         *create_jsonrpc_routes(handler, "/"),
     ]
-    return Starlette(routes=routes, lifespan=lifespan)
+
+    app: ASGIApp = Starlette(routes=routes, lifespan=lifespan)
+    if api_key:
+        app = ApiKeyAuthMiddleware(app, api_key)
+    # Outermost, so a rejected request is still a span: 401s are worth seeing.
+    return instrument_app(app, enabled=tracing_enabled)

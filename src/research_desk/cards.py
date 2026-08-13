@@ -15,6 +15,11 @@ from a2a.utils.constants import PROTOCOL_VERSION_CURRENT
 
 from research_desk import __version__
 from research_desk.config import AgentName
+from research_desk.protocol.auth import (
+    API_KEY_SCHEME,
+    api_key_requirement,
+    api_key_security_scheme,
+)
 
 PROVIDER = a2a_pb2.AgentProvider(
     organization="Research Desk",
@@ -39,8 +44,9 @@ def _card(
     url: str,
     skills: list[a2a_pb2.AgentSkill],
     output_modes: list[str],
+    require_api_key: bool = False,
 ) -> a2a_pb2.AgentCard:
-    return a2a_pb2.AgentCard(
+    card = a2a_pb2.AgentCard(
         name=name,
         description=description,
         version=__version__,
@@ -58,10 +64,17 @@ def _card(
         default_output_modes=output_modes,
         skills=skills,
     )
+    if require_api_key:
+        # The card is how a caller learns what credential to present; the
+        # scheme is advertised, never assumed.
+        card.security_schemes[API_KEY_SCHEME].CopyFrom(api_key_security_scheme())
+        card.security_requirements.append(api_key_requirement())
+    return card
 
 
-def coordinator_card(url: str) -> a2a_pb2.AgentCard:
+def coordinator_card(url: str, *, require_api_key: bool = False) -> a2a_pb2.AgentCard:
     return _card(
+        require_api_key=require_api_key,
         name="Coordinator",
         description=(
             "Entry point of the research desk. Discovers the specialist agents on its "
@@ -90,8 +103,9 @@ def coordinator_card(url: str) -> a2a_pb2.AgentCard:
     )
 
 
-def researcher_card(url: str) -> a2a_pb2.AgentCard:
+def researcher_card(url: str, *, require_api_key: bool = False) -> a2a_pb2.AgentCard:
     return _card(
+        require_api_key=require_api_key,
         name="Researcher",
         description=(
             "Gathers the factual landscape for a topic: what exists, who the players "
@@ -116,8 +130,9 @@ def researcher_card(url: str) -> a2a_pb2.AgentCard:
     )
 
 
-def analyst_card(url: str) -> a2a_pb2.AgentCard:
+def analyst_card(url: str, *, require_api_key: bool = False) -> a2a_pb2.AgentCard:
     return _card(
+        require_api_key=require_api_key,
         name="Analyst",
         description=(
             "Reads raw research and distils it into machine-readable findings: themes, "
@@ -142,8 +157,9 @@ def analyst_card(url: str) -> a2a_pb2.AgentCard:
     )
 
 
-def writer_card(url: str) -> a2a_pb2.AgentCard:
+def writer_card(url: str, *, require_api_key: bool = False) -> a2a_pb2.AgentCard:
     return _card(
+        require_api_key=require_api_key,
         name="Writer",
         description=(
             "Composes the final decision-ready brief in Markdown from the research "
@@ -176,6 +192,6 @@ _BUILDERS = {
 }
 
 
-def build_card(agent: AgentName, url: str) -> a2a_pb2.AgentCard:
+def build_card(agent: AgentName, url: str, *, require_api_key: bool = False) -> a2a_pb2.AgentCard:
     """Build the agent card for ``agent``, advertised at the given absolute URL."""
-    return _BUILDERS[agent](url)
+    return _BUILDERS[agent](url, require_api_key=require_api_key)

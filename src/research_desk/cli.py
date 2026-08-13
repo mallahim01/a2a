@@ -18,7 +18,12 @@ import sys
 
 import httpx
 import uvicorn
-from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
+from a2a.client import (
+    A2ACardResolver,
+    AuthInterceptor,
+    ClientConfig,
+    ClientFactory,
+)
 from a2a.helpers import (
     display_agent_card,
     get_artifact_text,
@@ -31,6 +36,7 @@ from research_desk import __version__
 from research_desk.agents import build_agent_app
 from research_desk.config import AgentName, get_settings
 from research_desk.logging import bind_agent, configure_logging, get_logger
+from research_desk.protocol.auth import StaticApiKeyCredentials
 
 logger = get_logger(__name__)
 
@@ -136,7 +142,16 @@ async def _ask(question: str, base_url: str) -> int:
 
         print(f"→ {card.name} v{card.version} — {', '.join(s.id for s in card.skills)}\n")
 
-        client = ClientFactory(ClientConfig(streaming=True, httpx_client=http_client)).create(card)
+        # The interceptor reads the card's securitySchemes and attaches the
+        # credential in whatever form the agent asked for.
+        interceptors = (
+            [AuthInterceptor(StaticApiKeyCredentials(settings.a2a_api_key))]
+            if settings.a2a_api_key
+            else None
+        )
+        client = ClientFactory(ClientConfig(streaming=True, httpx_client=http_client)).create(
+            card, interceptors=interceptors
+        )
         request = a2a_pb2.SendMessageRequest(
             message=a2a_pb2.Message(
                 message_id=f"cli-{id(question):x}",
@@ -248,7 +263,12 @@ async def _card(base_url: str) -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"Could not fetch the agent card from {base_url}: {exc}", file=sys.stderr)
             return 2
+    # Agent cards stay public even when the protocol endpoint is guarded — a
+    # caller has to read the card to learn which credential to present.
     display_agent_card(card)
+    if card.security_requirements:
+        schemes = ", ".join(sorted(card.security_schemes))
+        print(f"\nThis agent requires authentication. Schemes: {schemes}")
     return 0
 
 
