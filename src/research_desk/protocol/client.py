@@ -10,9 +10,10 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
 import httpx
-from a2a.client import ClientConfig, ClientFactory
+from a2a.client import Client, ClientConfig, ClientFactory
 from a2a.helpers import get_artifact_text, get_data_parts, get_message_text
 from a2a.types import a2a_pb2
 
@@ -63,9 +64,9 @@ class PeerClient:
 
     def __init__(self, http_client: httpx.AsyncClient) -> None:
         self._factory = ClientFactory(ClientConfig(streaming=False, httpx_client=http_client))
-        self._clients: dict[str, Any] = {}
+        self._clients: dict[str, Client] = {}
 
-    def _client_for(self, card: a2a_pb2.AgentCard) -> Any:
+    def _client_for(self, card: a2a_pb2.AgentCard) -> Client:
         key = card.supported_interfaces[0].url if card.supported_interfaces else card.name
         if key not in self._clients:
             self._clients[key] = self._factory.create(card)
@@ -88,7 +89,7 @@ class PeerClient:
         client = self._client_for(card)
 
         message = a2a_pb2.Message(
-            message_id=f"{skill_id}-{int(started * 1_000_000)}",
+            message_id=f"{skill_id}-{uuid4()}",
             role=a2a_pb2.ROLE_USER,
             parts=[a2a_pb2.Part(text=prompt)],
         )
@@ -132,7 +133,7 @@ class PeerClient:
         return result
 
     @staticmethod
-    async def _send(client: Any, request: a2a_pb2.SendMessageRequest) -> a2a_pb2.Task:
+    async def _send(client: Client, request: a2a_pb2.SendMessageRequest) -> a2a_pb2.Task:
         """Drain the response stream and return the final Task."""
         task: a2a_pb2.Task | None = None
         message: a2a_pb2.Message | None = None
