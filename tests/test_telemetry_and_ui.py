@@ -130,6 +130,13 @@ async def test_the_console_is_served_by_the_coordinator(desk: Desk) -> None:
     assert response.headers["content-type"].startswith("text/html")
 
 
+async def test_the_console_is_not_cached_by_the_browser(desk: Desk) -> None:
+    """A stale cached console silently stops parsing events and looks like a hang."""
+    response = await desk.client.get(f"{desk.url(AgentName.COORDINATOR)}/ui")
+
+    assert response.headers["cache-control"] == "no-cache"
+
+
 async def test_only_the_coordinator_serves_the_console(desk: Desk) -> None:
     response = await desk.client.get(f"{desk.url(AgentName.WRITER)}/ui")
 

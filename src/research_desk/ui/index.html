@@ -123,7 +123,9 @@
 
   <footer>
     Agents publish their cards at <code>/.well-known/agent-card.json</code> ·
-    <a href="/agents">see what the coordinator discovered</a>
+    <a href="/agents">see what the coordinator discovered</a> ·
+    <a href="/health">health</a>
+    <span id="build"></span>
   </footer>
 </div>
 
@@ -366,6 +368,12 @@ document.querySelectorAll(".examples button").forEach((button) => {
     ask(button.dataset.q);
   });
 });
+
+// Shows which agent build answered, so a stale cached page is obvious.
+fetch("/health")
+  .then((response) => response.json())
+  .then((health) => { $("build").textContent = ` · coordinator v${health.version}`; })
+  .catch(() => {});
 
 paintGraph();
 </script>

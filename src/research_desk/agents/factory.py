@@ -124,8 +124,18 @@ def _build_coordinator(
         )
 
     async def console(_: Request) -> FileResponse:
-        """The live console — itself an A2A client, running in the browser."""
-        return FileResponse(UI_INDEX, media_type="text/html")
+        """The live console — itself an A2A client, running in the browser.
+
+        ``no-cache`` still allows an ETag revalidation, but stops a browser
+        serving a stale console from its own cache after a redeploy — which
+        looks exactly like the desk hanging, since an outdated page silently
+        fails to parse the event stream.
+        """
+        return FileResponse(
+            UI_INDEX,
+            media_type="text/html",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     async def on_startup() -> None:
         logger.info(
