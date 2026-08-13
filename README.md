@@ -9,6 +9,10 @@ standalone HTTP server that publishes an **agent card**, and every hand-off is a
 real JSON-RPC request across the network. Take one agent down and the others
 notice; move a skill to a different host and routing follows it.
 
+Agents authenticate to each other with the scheme their cards advertise, and one
+request is traceable across all four services in Jaeger. A browser console at
+`/ui` — itself an A2A client — shows the collaboration as it happens.
+
 ```
 $ research-desk ask "the state of open agent interoperability protocols"
 
@@ -26,6 +30,32 @@ $ research-desk ask "the state of open agent interoperability protocols"
   [artifact ] brief.md (2031 chars)
   [artifact ] collaboration.json (1 data part(s))
   [completed]
+```
+
+The same run, as one distributed trace — the coordinator's span is the parent of
+the researcher's, one process over:
+
+```
+span                                                   duration  service
+------------------------------------------------------------------------------
+POST /                                                  15756ms  coordinator
+  a2a.orchestrate research_brief                        15723ms  coordinator
+    POST                                                  279ms  coordinator   ← planner LLM
+    a2a.delegate gather_sources                         11246ms  coordinator
+      POST                                              11207ms  coordinator   ← A2A call
+        POST /                                          11191ms  researcher
+          a2a.agent Researcher                          11178ms  researcher
+            POST                                        11155ms  researcher    ← Gemini
+    a2a.delegate extract_insights                        1906ms  coordinator
+      POST                                               1900ms  coordinator
+        POST /                                           1878ms  analyst
+          a2a.agent Analyst                              1864ms  analyst
+            POST                                         1855ms  analyst       ← Groq
+    a2a.delegate compose_brief                           2268ms  coordinator
+      POST                                               2251ms  coordinator
+        POST /                                           2240ms  writer
+          a2a.agent Writer                               2223ms  writer
+            POST                                         2209ms  writer        ← Groq
 ```
 
 ---
@@ -54,7 +84,8 @@ that shape.
 
 ```mermaid
 graph TB
-    user["Client<br/><i>research-desk ask</i>"]
+    cli["CLI<br/><i>research-desk ask</i>"]
+    ui["Browser console<br/><i>/ui — also an A2A client</i>"]
 
     subgraph desk["Research Desk"]
         coord["<b>Coordinator</b> :8000<br/>skill: research_brief<br/><i>A2A server + A2A client</i>"]
@@ -65,12 +96,14 @@ graph TB
 
     gemini["Google Gemini"]
     groq["Groq Cloud"]
+    jaeger["Jaeger<br/><i>OTLP traces</i>"]
 
-    user -->|"A2A SendMessage"| coord
+    cli -->|"A2A SendMessage"| coord
+    ui -->|"A2A SendStreamingMessage (SSE)"| coord
     coord -.->|"GET agent-card.json<br/>(discovery)"| res
     coord -.->|"GET agent-card.json"| ana
     coord -.->|"GET agent-card.json"| wri
-    coord ==>|"A2A SendMessage"| res
+    coord ==>|"A2A SendMessage<br/>+ X-API-Key + traceparent"| res
     coord ==>|"A2A SendMessage"| ana
     coord ==>|"A2A SendMessage"| wri
 
@@ -79,10 +112,15 @@ graph TB
     wri --> groq
     coord --> groq
 
+    coord -.-> jaeger
+    res -.-> jaeger
+    ana -.-> jaeger
+    wri -.-> jaeger
+
     classDef agent stroke:#1f6feb,stroke-width:2px
     classDef ext stroke:#8957e5,stroke-width:2px
     class coord,res,ana,wri agent
-    class gemini,groq ext
+    class gemini,groq,jaeger ext
 ```
 
 Dotted arrows are discovery, thick arrows are delegated work. The coordinator is
@@ -144,6 +182,7 @@ run is traceable across all four services from their logs alone.
 | **Structured communication** | The analyst publishes its findings twice — as text and as a typed `DataPart` — so the next agent consumes fields rather than re-parsing prose. |
 | **Separation** | Four processes, four ports, four containers. The only thing crossing the boundary is the protocol. |
 | **Orchestration** | [`agents/coordinator.py`](src/research_desk/agents/coordinator.py) — plans, routes **by skill id**, and degrades gracefully when a peer is missing. |
+| **Security** | [`protocol/auth.py`](src/research_desk/protocol/auth.py) — the card declares `securitySchemes`, the middleware enforces it, and the SDK's `AuthInterceptor` reads the *callee's* card to decide what to send. |
 
 ### Routing is by skill, not by address
 
@@ -166,17 +205,63 @@ Every run publishes a `collaboration.json` artifact recording each hop — peer,
 skill, task id, state, duration — so the protocol traffic is visible in the
 response itself, not just in the logs.
 
+### Authentication is declared, not assumed
+
+A2A does not define its own auth mechanism. An agent *declares* what it accepts
+in its card, and callers read that declaration:
+
+```jsonc
+// GET /.well-known/agent-card.json  — public, so discovery works first
+"securitySchemes": {
+  "api_key": { "apiKeySecurityScheme": { "name": "X-API-Key", "location": "header" } }
+},
+"securityRequirements": [{ "schemes": { "api_key": {} } }]
+```
+
+Set `A2A_API_KEY` and every agent requires the header, the coordinator presents
+it on each delegated call, and unauthenticated requests get a `401`. Agent cards
+and `/health` stay public either way — a caller must be able to read the card to
+learn which credential to present. Leave the variable unset and the desk runs
+open, which is what keeps `git clone && run` a one-liner.
+
+The caller never hardcodes a header name: the SDK's `AuthInterceptor` inspects
+the callee's card, so a peer that switches to bearer tokens tomorrow is
+accommodated without touching the coordinator.
+
+### One request, one trace
+
+Set `TELEMETRY_ENABLED=true` and each agent exports OTLP spans. Propagation is
+standard W3C `traceparent`: httpx instrumentation injects it on the way out, ASGI
+instrumentation extracts it on the way in, so the coordinator's span becomes the
+parent of the researcher's in a different process. Spans carry `a2a.context_id`,
+the same id that appears in the logs.
+
+`docker compose up` includes Jaeger — open <http://127.0.0.1:16686>, pick
+`research-desk-coordinator`, and one trace shows the whole collaboration (the
+waterfall at the top of this README is a real one).
+
+### A browser that speaks A2A
+
+`http://127.0.0.1:8000/ui` is a single self-contained HTML file with no build
+step and no dependencies. It is not a backend-rendered dashboard: it opens its
+own `SendStreamingMessage` call, parses the SSE frames by hand, and lights up
+each agent as work reaches it — including the degraded paths, where a missing
+peer is drawn as skipped rather than silently omitted.
+
 ## Project structure
 
 ```
 src/research_desk/
-├── cards.py            Agent cards: identity, skills, transport binding
+├── cards.py            Agent cards: identity, skills, transport, security
 ├── config.py           Environment-driven settings; API-key pools
 ├── logging.py          Structured logs correlated by context_id / task_id
+├── telemetry.py        Optional OpenTelemetry tracing across agent hops
 ├── cli.py              serve · dev · ask · card
+├── ui/index.html       The live console — an A2A client in the browser
 ├── protocol/           The A2A layer — knows nothing about research
 │   ├── server.py         Builds the ASGI app: JSON-RPC + card + /health
 │   ├── client.py         Outbound delegation to a discovered peer
+│   ├── auth.py           API-key scheme: declared in cards, enforced at the edge
 │   └── discovery.py      Fetches peer cards, indexes skills
 ├── agents/             The four agents
 │   ├── base.py           Shared executor: task lifecycle → artifact
@@ -189,10 +274,12 @@ src/research_desk/
     ├── _http.py          Shared retry + API-key rotation
     └── registry.py       "groq:llama-3.3-70b" → provider
 
-tests/                  116 tests, no network or API keys required
+tests/                  145 tests, no network or API keys required
 ├── conftest.py           Runs all four agents in-process over ASGI transport
 ├── test_collaboration_e2e.py   Full multi-agent runs, including failure modes
 ├── test_protocol_endpoints.py  Wire-level JSON-RPC and agent cards
+├── test_auth.py                Card declarations, enforcement, agent-to-agent auth
+├── test_telemetry_and_ui.py    Tracing wiring, and the SSE stream the console parses
 └── test_discovery.py · test_agents.py · test_llm.py · test_cards.py · test_config.py
 ```
 
@@ -240,14 +327,24 @@ research-desk serve writer         # :8003
 research-desk serve coordinator    # :8000
 ```
 
+…or open the live console at <http://127.0.0.1:8000/ui>.
+
 Other commands:
 
 ```bash
 research-desk card http://127.0.0.1:8001   # inspect any agent's card
 curl http://127.0.0.1:8000/health          # liveness
 curl http://127.0.0.1:8000/agents          # what the coordinator discovered
-pytest                                     # 116 tests, no keys needed
+pytest                                     # 145 tests, no keys needed
 ruff check . && mypy                       # lint + strict type check
+```
+
+To turn on authentication, set one variable for every process:
+
+```bash
+A2A_API_KEY=some-shared-secret research-desk dev
+A2A_API_KEY=some-shared-secret research-desk ask "…"     # client needs it too
+open "http://127.0.0.1:8000/ui?key=some-shared-secret"   # console reads it from the URL
 ```
 
 ## Running with Docker
@@ -256,11 +353,16 @@ ruff check . && mypy                       # lint + strict type check
 docker compose up --build
 ```
 
-Four containers on one network — the deployment A2A is actually for. Only the
-coordinator's port is published:
+Four agent containers on one network — the deployment A2A is actually for — plus
+Jaeger. Only the coordinator's port is published:
+
+| | |
+|---|---|
+| <http://127.0.0.1:8000/ui> | live console |
+| <http://127.0.0.1:8000/agents> | what the coordinator discovered |
+| <http://127.0.0.1:16686> | Jaeger — one trace across all four agents |
 
 ```bash
-curl http://127.0.0.1:8000/agents
 research-desk ask "how does WebAssembly change edge computing"
 ```
 
@@ -295,6 +397,9 @@ Everything is an environment variable; see [`.env.example`](.env.example).
 | `PEER_AGENT_URLS` | localhost peers | Comma-separated base URLs the coordinator discovers |
 | `PUBLIC_URL` | derived | Absolute URL this agent advertises in its card |
 | `PORT`, `HOST` | per agent | Bind address |
+| `A2A_API_KEY` | unset | Set it and every agent requires `X-API-Key`; unset runs open |
+| `TELEMETRY_ENABLED` | `false` | Export OTLP traces (needs the `telemetry` extra) |
+| `OTEL_EXPORTER_ENDPOINT` | `http://127.0.0.1:4318` | Collector root, e.g. Jaeger |
 | `RESEARCHER_ENABLE_SEARCH` | `false` | Gemini Google Search grounding (needs a paid plan) |
 | `LOG_FORMAT` | `console` | `console` or `json` |
 
@@ -387,17 +492,38 @@ explainable and testable.
 all four applications in-process and wires the coordinator's HTTP client to them.
 Same protocol stack, same code paths as Docker — only the socket is replaced.
 
+**Auth is enforced by pure-ASGI middleware, not `BaseHTTPMiddleware`.** The
+latter buffers responses, which would break streaming on the JSON-RPC route —
+the one route that actually needs to stream.
+
+**Tracing is genuinely optional.** Nothing outside `telemetry.py` imports
+OpenTelemetry; the imports live inside the function that configures it. With
+`TELEMETRY_ENABLED=false` the spans are `nullcontext()` and the extra need not be
+installed at all.
+
+**The SDK's own instrumentation is disabled in Compose.** It emits hundreds of
+event-queue spans per request, which buries the agent hops — 255 spans became 44,
+and the waterfall became readable. Set `OTEL_INSTRUMENTATION_A2A_SDK_ENABLED=true`
+when debugging the SDK itself.
+
+**The console is one static file with no build step.** A React app with a bundler
+would add a toolchain to a repo whose point is protocol clarity. Plain fetch plus
+a hand-written SSE parser is ~120 lines and shows exactly what an A2A client does.
+
 ## Limitations
 
 This is a demonstration, and it is deliberately bounded:
 
 - **In-memory task store.** Task state is lost on restart. The SDK ships a
   database-backed store; swapping it is a one-line change in `protocol/server.py`.
-- **No authentication.** Endpoints are open. The agent card has `securitySchemes`
-  for exactly this, and the SDK has interceptors for credentials — neither is
-  wired up.
+- **Authentication is a single shared API key.** Real enough to demonstrate the
+  card-declared scheme and agent-to-agent credentials, but there is one key for
+  the whole desk: no per-agent identity, no rotation, no expiry, no authorisation
+  (any authenticated caller may invoke any skill).
 - **Discovery is configuration-seeded.** Peers come from `PEER_AGENT_URLS`; there
   is no registry service, no health-based failover, no dynamic membership.
+- **Traces are exported, not sampled or budgeted.** Every request is traced at
+  100% with no tail sampling, and the collector endpoint is unauthenticated.
 - **JSON-RPC transport only.** The spec also defines gRPC and REST bindings.
 - **`input-required` uses a length heuristic**, not a model judging the question.
 - **No `CancelTask` support.** A single model call is not interruptible, so
@@ -408,16 +534,17 @@ This is a demonstration, and it is deliberately bounded:
 
 ## Future improvements
 
-- More specialists (fact-checker, critic, translator) — each one is a new card
-  and a new container, with no coordinator change beyond adding a pipeline stage
-- Authentication and authorisation via the card's `securitySchemes` and SDK
-  client interceptors
+- **An agent in another language** (Go, TypeScript) that this coordinator
+  discovers and calls unchanged — the clearest possible proof of the protocol's
+  point, and the most valuable thing left to add
+- Per-agent identity and authorisation: OAuth2 client credentials instead of one
+  shared key, with skills gated per caller
 - Persistent task state with the SDK's database store, plus `CancelTask` and
   push-notification callbacks for long-running work
 - A registry service for discovery at scale, with health-aware routing and more
   than one agent per skill
-- OpenTelemetry tracing across agent hops — the SDK has a `telemetry` extra, and
-  `context_id` is already the correlation key
+- Protocol-cost benchmarking: what A2A delegation actually costs against an
+  equivalent in-process call
 - Parallel fan-out where stages are independent, instead of a strict pipeline
 - Production deployment: TLS, per-agent autoscaling, rate limits, cost budgets
 
@@ -431,10 +558,14 @@ This is a demonstration, and it is deliberately bounded:
 - **Key pools are a resilience feature, not a secret store.** For production,
   use a real secret manager (AWS Secrets Manager, Vault, Kubernetes secrets)
   rather than a `.env` file.
-- **The demo endpoints are unauthenticated and must not be exposed publicly.**
-  Before any real deployment: add auth via the agent card's `securitySchemes`,
-  terminate TLS, and rate-limit — an open agent endpoint backed by a paid model
-  API is a billing incident waiting to happen.
+- **Authentication is off unless `A2A_API_KEY` is set.** That default is for
+  clone-and-run convenience only. An open agent endpoint backed by a paid model
+  API is a billing incident waiting to happen — set the key, terminate TLS, and
+  rate-limit before exposing anything. The shared-key scheme here demonstrates
+  the mechanism; production wants per-agent identity and short-lived tokens.
+- **Agent cards are intentionally public**, including the security schemes they
+  declare. That is how discovery works, and it is why cards must never carry
+  anything sensitive.
 - **Agent output is untrusted input.** Text returned by one agent is fed to the
   next as a prompt, which is a prompt-injection path. A production system would
   validate and delimit inter-agent content rather than concatenating it.
