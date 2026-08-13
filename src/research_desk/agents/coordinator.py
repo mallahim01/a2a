@@ -36,6 +36,7 @@ from research_desk.llm import ChatRequest, LLMError, LLMProvider
 from research_desk.logging import bind_task, get_logger
 from research_desk.protocol.client import PeerClient, PeerError, PeerResult
 from research_desk.protocol.discovery import AgentRegistry, SkillNotAvailableError
+from research_desk.telemetry import span
 
 logger = get_logger(__name__)
 
@@ -96,6 +97,19 @@ class CoordinatorExecutor(AgentExecutor):
             await event_queue.enqueue_event(task)
 
         bind_task(task.context_id, task.id)
+        # The root of the collaboration: every peer span below descends from
+        # this one, which is what makes the trace a readable call graph.
+        with span(
+            "a2a.orchestrate research_brief",
+            agent="Coordinator",
+            context_id=task.context_id,
+            task_id=task.id,
+        ):
+            await self._run(context, event_queue, task)
+
+    async def _run(
+        self, context: RequestContext, event_queue: EventQueue, task: a2a_pb2.Task
+    ) -> None:
         updater = TaskUpdater(event_queue, task.id, task.context_id)
 
         question = context.get_user_input().strip()

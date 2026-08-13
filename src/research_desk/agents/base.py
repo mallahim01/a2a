@@ -26,6 +26,7 @@ from a2a.types import a2a_pb2
 
 from research_desk.llm import ChatRequest, LLMError, LLMProvider
 from research_desk.logging import bind_task, get_logger
+from research_desk.telemetry import span
 
 logger = get_logger(__name__)
 
@@ -70,6 +71,19 @@ class LLMAgentExecutor(AgentExecutor):
             await event_queue.enqueue_event(task)
 
         bind_task(task.context_id, task.id)
+        # An explicit span per agent, so a trace reads as "who did what" rather
+        # than as the SDK's internal queue machinery.
+        with span(
+            f"a2a.agent {self._agent_label}",
+            agent=self._agent_label,
+            context_id=task.context_id,
+            task_id=task.id,
+        ):
+            await self._run(context, event_queue, task)
+
+    async def _run(
+        self, context: RequestContext, event_queue: EventQueue, task: a2a_pb2.Task
+    ) -> None:
         updater = TaskUpdater(event_queue, task.id, task.context_id)
 
         user_input = context.get_user_input().strip()

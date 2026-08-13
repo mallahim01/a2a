@@ -13,11 +13,13 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
-from a2a.client import Client, ClientConfig, ClientFactory
+from a2a.client import AuthInterceptor, Client, ClientConfig, ClientFactory
 from a2a.helpers import get_artifact_text, get_data_parts, get_message_text
 from a2a.types import a2a_pb2
 
 from research_desk.logging import get_logger
+from research_desk.protocol.auth import StaticApiKeyCredentials
+from research_desk.telemetry import span
 
 logger = get_logger(__name__)
 
@@ -62,14 +64,19 @@ class PeerClient:
     shared transport. The application that owns the httpx client closes it.
     """
 
-    def __init__(self, http_client: httpx.AsyncClient) -> None:
+    def __init__(self, http_client: httpx.AsyncClient, *, api_key: str | None = None) -> None:
         self._factory = ClientFactory(ClientConfig(streaming=False, httpx_client=http_client))
         self._clients: dict[str, Client] = {}
+        # The interceptor reads each peer's card and attaches whatever credential
+        # that card asks for — the caller never hardcodes a header name.
+        self._interceptors = (
+            [AuthInterceptor(StaticApiKeyCredentials(api_key))] if api_key else None
+        )
 
     def _client_for(self, card: a2a_pb2.AgentCard) -> Client:
         key = card.supported_interfaces[0].url if card.supported_interfaces else card.name
         if key not in self._clients:
-            self._clients[key] = self._factory.create(card)
+            self._clients[key] = self._factory.create(card, interceptors=self._interceptors)
         return self._clients[key]
 
     async def delegate(
@@ -102,7 +109,14 @@ class PeerClient:
         )
 
         try:
-            task = await self._send(client, a2a_pb2.SendMessageRequest(message=message))
+            # One span per delegation, so a trace reads as the call graph it is.
+            with span(
+                f"a2a.delegate {skill_id}",
+                peer=card.name,
+                skill=skill_id,
+                context_id=context_id,
+            ):
+                task = await self._send(client, a2a_pb2.SendMessageRequest(message=message))
         except PeerError:
             raise
         except Exception as exc:
