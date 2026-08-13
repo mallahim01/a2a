@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - run: pip install -e ".[dev]"
+
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy
+      # The suite needs no credentials: agents run on the stub provider and all
+      # HTTP is either mocked or served in-process.
+      - run: pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t research-desk:ci .
+      - name: Agent starts and reports healthy
+        run: |
+          docker run -d --name probe -p 8002:8002 \
+            -e PORT=8002 -e ANALYST_MODEL=stub:ci research-desk:ci serve analyst
+          for _ in $(seq 1 20); do
+            curl -fsS http://127.0.0.1:8002/health && exit 0
+            sleep 1
+          done
+          docker logs probe
+          exit 1
