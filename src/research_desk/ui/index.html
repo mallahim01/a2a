@@ -143,6 +143,7 @@ const graph = $("graph"), arrows = $("arrows"), log = $("log"), out = $("out"), 
 const API_KEY = new URLSearchParams(location.search).get("key") || "";
 
 function paintGraph() {
+  stopTimers();
   graph.innerHTML = "";
   arrows.innerHTML = "";
   AGENTS.forEach((a, i) => {
@@ -162,13 +163,34 @@ function paintGraph() {
   });
 }
 
+// A model call takes 10-25s. Without a ticking clock the page looks frozen, so
+// every active node counts up until it finishes.
+const timers = {};
+
 function setNode(key, state, label) {
   const node = $("node-" + key);
   if (!node) return;
   node.dataset.state = state;
-  node.querySelector(".state").textContent = label || state;
-  const arrow = $("arrow-" + key);
-  if (arrow) arrow.className = state === "idle" ? "" : "lit";
+  const field = node.querySelector(".state");
+
+  clearInterval(timers[key]);
+  delete timers[key];
+
+  if (state === "active") {
+    const started = performance.now();
+    const tick = () => {
+      const seconds = (performance.now() - started) / 1000;
+      field.textContent = `${label || "working"} ${seconds.toFixed(1)}s`;
+    };
+    tick();
+    timers[key] = setInterval(tick, 100);
+  } else {
+    field.textContent = label || state;
+  }
+}
+
+function stopTimers() {
+  Object.values(timers).forEach(clearInterval);
 }
 
 function line(tag, text, cls) {
@@ -218,6 +240,7 @@ async function ask(question) {
   try {
     response = await fetch("/", { method: "POST", headers, body: JSON.stringify(body) });
   } catch (err) {
+    stopTimers();
     line("error", String(err), "error");
     setNode("coordinator", "failed", "error");
     $("go").disabled = false;
@@ -226,6 +249,7 @@ async function ask(question) {
 
   if (!response.ok) {
     const detail = await response.text();
+    stopTimers();
     line("error", `HTTP ${response.status} — ${detail.slice(0, 300)}`, "error");
     setNode("coordinator", "failed", "error");
     $("go").disabled = false;
@@ -298,6 +322,7 @@ async function ask(question) {
     }
   }
 
+  stopTimers();
   render(task, artifacts);
   $("go").disabled = false;
 }

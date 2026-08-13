@@ -86,7 +86,11 @@ class Settings(BaseSettings):
 
     researcher_enable_search: bool = False
     llm_timeout_seconds: float = 90.0
-    llm_max_output_tokens: int = 2048
+    # Reasoning models spend part of this budget on internal thinking before
+    # emitting anything — measured at ~1000-1350 thinking tokens for Gemini
+    # flash on a detailed prompt. A 2048 budget left too little for the answer
+    # and occasionally produced a near-empty result, so leave clear headroom.
+    llm_max_output_tokens: int = 4096
     llm_temperature: float = 0.3
 
     # --- Server ---
