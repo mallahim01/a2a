@@ -34,13 +34,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t research-desk:ci .
-      - name: Agent starts and reports healthy
+      - name: Agent starts, reports healthy and enforces auth
         run: |
           docker run -d --name probe -p 8002:8002 \
-            -e PORT=8002 -e ANALYST_MODEL=stub:ci research-desk:ci serve analyst
+            -e PORT=8002 -e ANALYST_MODEL=stub:ci -e A2A_API_KEY=ci-key \
+            research-desk:ci serve analyst
           for _ in $(seq 1 20); do
-            curl -fsS http://127.0.0.1:8002/health && exit 0
+            curl -fsS http://127.0.0.1:8002/health > /dev/null && break
             sleep 1
           done
-          docker logs probe
-          exit 1
+          curl -fsS http://127.0.0.1:8002/health | grep -q '"auth_required": *true'
+          # The card must stay public, or discovery cannot bootstrap.
+          curl -fsS http://127.0.0.1:8002/.well-known/agent-card.json | grep -q X-API-Key
+          # And the protocol endpoint must refuse an unauthenticated call.
+          status=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8002/ \
+            -H 'Content-Type: application/json' -H 'A2A-Version: 1.0' \
+            -d '{"jsonrpc":"2.0","id":"1","method":"GetTask","params":{"id":"x"}}')
+          test "$status" = "401" || { echo "expected 401, got $status"; docker logs probe; exit 1; }

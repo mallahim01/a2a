@@ -16,7 +16,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 # rebuilt when the metadata changes — not on every source edit.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir .
+# Tracing is opt-in at run time (TELEMETRY_ENABLED), but the dependency ships in
+# the image so enabling it never needs a rebuild.
+RUN pip install --no-cache-dir ".[telemetry]"
 
 # --- runtime stage -----------------------------------------------------------
 FROM python:3.12-slim AS runtime

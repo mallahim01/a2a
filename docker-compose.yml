@@ -3,7 +3,8 @@
 # in its agent card, and the coordinator discovers all three at startup.
 #
 #   docker compose up --build
-#   curl http://127.0.0.1:8000/agents
+#   open http://127.0.0.1:8000/ui      live console
+#   open http://127.0.0.1:16686        Jaeger — one trace across all four agents
 
 name: research-desk
 
@@ -18,40 +19,75 @@ x-agent: &agent
   restart: unless-stopped
   networks: [desk]
 
+x-telemetry: &telemetry
+  TELEMETRY_ENABLED: "true"
+  OTEL_EXPORTER_ENDPOINT: http://jaeger:4318
+  # The SDK instruments its own internals, which buries the agent hops under
+  # hundreds of event-queue spans. Off by default here so the waterfall shows
+  # the collaboration; set to "true" when debugging the SDK itself.
+  OTEL_INSTRUMENTATION_A2A_SDK_ENABLED: "false"
+
 services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    container_name: desk-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # trace UI
+    networks: [desk]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:14269/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   researcher:
     <<: *agent
     container_name: desk-researcher
     command: ["serve", "researcher"]
     environment:
+      <<: *telemetry
       PORT: 8001
       PUBLIC_URL: http://researcher:8001/
+    depends_on:
+      jaeger:
+        condition: service_healthy
 
   analyst:
     <<: *agent
     container_name: desk-analyst
     command: ["serve", "analyst"]
     environment:
+      <<: *telemetry
       PORT: 8002
       PUBLIC_URL: http://analyst:8002/
+    depends_on:
+      jaeger:
+        condition: service_healthy
 
   writer:
     <<: *agent
     container_name: desk-writer
     command: ["serve", "writer"]
     environment:
+      <<: *telemetry
       PORT: 8003
       PUBLIC_URL: http://writer:8003/
+    depends_on:
+      jaeger:
+        condition: service_healthy
 
   coordinator:
     <<: *agent
     container_name: desk-coordinator
     command: ["serve", "coordinator"]
-    # The only port published to the host: specialists are reachable to each
-    # other, but the desk has a single front door.
+    # The only agent port published to the host: the specialists are reachable
+    # to each other, but the desk has a single front door.
     ports:
       - "8000:8000"
     environment:
+      <<: *telemetry
       PORT: 8000
       # An agent card must advertise a URL its *callers* can reach, and the
       # coordinator's callers are outside the Docker network. Hence the
