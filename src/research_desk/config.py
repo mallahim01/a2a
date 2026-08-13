@@ -9,9 +9,14 @@ from __future__ import annotations
 import os
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
+from typing import Annotated
 
+from dotenv import load_dotenv
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+DEFAULT_ENV_FILE = Path(".env")
 
 
 class AgentName(StrEnum):
@@ -29,6 +34,18 @@ DEFAULT_PORTS: dict[AgentName, int] = {
     AgentName.ANALYST: 8002,
     AgentName.WRITER: 8003,
 }
+
+
+def load_env_file(path: Path = DEFAULT_ENV_FILE) -> bool:
+    """Merge a ``.env`` file into the process environment for local development.
+
+    Real environment variables always win, so a container's injected secrets are
+    never shadowed by a stray file. Returns whether a file was found.
+    """
+    if not path.is_file():
+        return False
+    load_dotenv(path, override=False)
+    return True
 
 
 def collect_api_keys(prefix: str, environ: dict[str, str] | None = None) -> list[str]:
@@ -56,12 +73,10 @@ def collect_api_keys(prefix: str, environ: dict[str, str] | None = None) -> list
 class Settings(BaseSettings):
     """Runtime configuration, resolved from the process environment and ``.env``."""
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-        case_sensitive=False,
-    )
+    # Values come from the process environment only. `.env` is merged into it by
+    # load_env_file() first, so there is a single source of truth — which also
+    # keeps the API-key properties below reading the same place as the fields.
+    model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
 
     # --- Model routing: "<provider>:<model>", provider in {groq, gemini, stub} ---
     coordinator_model: str = "groq:llama-3.1-8b-instant"
@@ -80,7 +95,9 @@ class Settings(BaseSettings):
     public_url: str | None = None
 
     # --- Peer discovery ---
-    peer_agent_urls: list[str] = Field(
+    # NoDecode stops pydantic-settings treating the env var as JSON, so
+    # PEER_AGENT_URLS can be the plain comma-separated list operators expect.
+    peer_agent_urls: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [
             "http://127.0.0.1:8001",
             "http://127.0.0.1:8002",
@@ -137,5 +154,6 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Process-wide settings singleton."""
+    """Process-wide settings singleton, resolved once at startup."""
+    load_env_file()
     return Settings()

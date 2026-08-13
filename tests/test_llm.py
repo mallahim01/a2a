@@ -64,13 +64,13 @@ def test_rejects_unusable_specs(spec: str) -> None:
 
 
 def test_missing_credentials_are_reported_at_construction() -> None:
-    settings = Settings(_env_file=None)
+    settings = Settings()
     with pytest.raises(LLMConfigurationError, match="No API keys configured"):
         build_provider("groq:llama-3.1-8b-instant", settings)
 
 
 def test_stub_needs_no_credentials() -> None:
-    provider = build_provider("stub:offline", Settings(_env_file=None))
+    provider = build_provider("stub:offline", Settings())
     assert provider.name == "stub:offline"
 
 
@@ -79,7 +79,6 @@ def test_search_grounding_is_only_wired_into_the_researcher(
 ) -> None:
     monkeypatch.setenv("GOOGLE_API_KEY", "k")
     settings = Settings(
-        _env_file=None,
         researcher_enable_search=True,
         researcher_model="gemini:gemini-test",
         writer_model="gemini:gemini-test",

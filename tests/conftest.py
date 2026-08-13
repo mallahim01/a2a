@@ -9,6 +9,7 @@ in Docker, without network access or API keys.
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -69,8 +70,21 @@ class Desk:
         return agent_url(agent)
 
 
+@pytest.fixture(autouse=True)
+def isolated_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the developer's real ``.env`` and shell out of the test run."""
+    for name in list(os.environ):
+        if name.upper() in _SETTINGS_ENV_NAMES or name.upper().startswith(
+            ("GROQ_API_KEY", "GOOGLE_API_KEY")
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+
+_SETTINGS_ENV_NAMES = {name.upper() for name in Settings.model_fields}
+
+
 def build_settings(**overrides: object) -> Settings:
-    """Settings for tests: stub models, no .env, in-test peer URLs."""
+    """Settings for tests: stub models and in-test peer URLs."""
     values: dict[str, object] = {
         **STUB_MODELS,
         "peer_agent_urls": [agent_url(agent) for agent in SPECIALISTS],
@@ -78,7 +92,7 @@ def build_settings(**overrides: object) -> Settings:
         "discovery_retry_delay_seconds": 0.0,
         **overrides,
     }
-    return Settings(_env_file=None, **values)  # type: ignore[arg-type]
+    return Settings(**values)  # type: ignore[arg-type]
 
 
 def _scoped(settings: Settings, agent: AgentName) -> Settings:

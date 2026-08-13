@@ -21,6 +21,8 @@ _RESERVED = frozenset(logging.LogRecord("", 0, "", 0, "", None, None).__dict__) 
     "message",
     "asctime",
     "taskName",
+    # uvicorn attaches an ANSI-coloured duplicate of its own message.
+    "color_message",
 }
 
 

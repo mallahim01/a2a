@@ -13,12 +13,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 
 import httpx
 import uvicorn
 from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
-from a2a.helpers import display_agent_card, get_artifact_text, get_message_text
+from a2a.helpers import (
+    display_agent_card,
+    get_artifact_text,
+    get_data_parts,
+    get_message_text,
+)
 from a2a.types import a2a_pb2
 
 from research_desk import __version__
@@ -141,57 +147,96 @@ async def _ask(question: str, base_url: str) -> int:
 
         # The client is not closed explicitly: Client.close() disposes of the
         # httpx client, which the enclosing context manager already owns.
-        final: a2a_pb2.Task | None = None
+        stream = TaskStream()
         try:
             async for chunk in client.send_message(request):
-                final = _render(chunk) or final
+                stream.consume(chunk)
         except Exception as exc:  # noqa: BLE001
             print(f"\nRequest failed: {exc}", file=sys.stderr)
+            advertised = card.supported_interfaces[0].url if card.supported_interfaces else ""
+            if advertised and not advertised.startswith(base_url.rstrip("/")):
+                print(
+                    f"The agent card advertises {advertised}, which this machine may not be "
+                    f"able to reach. Set PUBLIC_URL on that agent to an address its callers "
+                    f"can resolve.",
+                    file=sys.stderr,
+                )
             return 2
 
-    return _render_final(final)
+    return stream.report()
 
 
-def _render(chunk: a2a_pb2.StreamResponse) -> a2a_pb2.Task | None:
-    """Print one streamed event; return the task when the payload carries one."""
-    payload = chunk.WhichOneof("payload")
+class TaskStream:
+    """Folds a stream of A2A events back into the task they describe.
 
-    if payload == "status_update":
-        status = chunk.status_update.status
-        state = a2a_pb2.TaskState.Name(status.state).removeprefix("TASK_STATE_").lower()
-        text = get_message_text(status.message) if status.HasField("message") else ""
-        print(f"  [{state:<9}] {text}")
-        return None
+    A streaming ``SendMessage`` opens with the freshly submitted ``Task`` and
+    then sends deltas: ``TaskStatusUpdateEvent`` as the work progresses and
+    ``TaskArtifactUpdateEvent`` as results are published. A client that keeps
+    only the opening task sees it stuck at ``submitted``, so the deltas have to
+    be applied as they arrive.
+    """
 
-    if payload == "artifact_update":
-        artifact = chunk.artifact_update.artifact
-        print(f"  [artifact ] {artifact.name} ({len(get_artifact_text(artifact))} chars)")
-        return None
+    def __init__(self) -> None:
+        self._task: a2a_pb2.Task | None = None
+        self._artifacts: dict[str, a2a_pb2.Artifact] = {}
 
-    if payload == "task":
-        return chunk.task
+    def consume(self, chunk: a2a_pb2.StreamResponse) -> None:
+        payload = chunk.WhichOneof("payload")
 
-    if payload == "message":
-        print(f"  [message  ] {get_message_text(chunk.message)}")
-    return None
+        if payload == "task":
+            self._task = chunk.task
+            for artifact in chunk.task.artifacts:
+                self._artifacts[artifact.artifact_id] = artifact
+
+        elif payload == "status_update":
+            status = chunk.status_update.status
+            if self._task is not None:
+                self._task.status.CopyFrom(status)
+            state = a2a_pb2.TaskState.Name(status.state).removeprefix("TASK_STATE_").lower()
+            text = get_message_text(status.message) if status.HasField("message") else ""
+            print(f"  [{state:<9}] {text}".rstrip())
+
+        elif payload == "artifact_update":
+            artifact = chunk.artifact_update.artifact
+            self._artifacts[artifact.artifact_id] = artifact
+            print(f"  [artifact ] {artifact.name} ({_describe(artifact)})")
+
+        elif payload == "message":
+            print(f"  [message  ] {get_message_text(chunk.message)}")
+
+    def report(self) -> int:
+        """Print the finished task. Returns a shell exit code."""
+        if self._task is None:
+            print("\nNo task was returned.", file=sys.stderr)
+            return 2
+
+        state = a2a_pb2.TaskState.Name(self._task.status.state)
+        print(
+            f"\n{'=' * 72}\n"
+            f"task {self._task.id}  context {self._task.context_id}  state {state}\n"
+            f"{'=' * 72}"
+        )
+
+        for artifact in self._artifacts.values():
+            print(f"\n--- {artifact.name} ---\n")
+            print(_render_artifact(artifact))
+
+        if not self._artifacts and self._task.status.HasField("message"):
+            print(get_message_text(self._task.status.message))
+
+        return 0 if state == "TASK_STATE_COMPLETED" else 1
 
 
-def _render_final(task: a2a_pb2.Task | None) -> int:
-    if task is None:
-        print("\nNo task was returned.", file=sys.stderr)
-        return 2
+def _describe(artifact: a2a_pb2.Artifact) -> str:
+    if text := get_artifact_text(artifact):
+        return f"{len(text)} chars"
+    return f"{len(artifact.parts)} data part(s)"
 
-    state = a2a_pb2.TaskState.Name(task.status.state)
-    print(f"\n{'=' * 72}\ntask {task.id}  context {task.context_id}  state {state}\n{'=' * 72}")
 
-    for artifact in task.artifacts:
-        print(f"\n--- {artifact.name} ---\n")
-        print(get_artifact_text(artifact))
-
-    if not task.artifacts and task.status.HasField("message"):
-        print(get_message_text(task.status.message))
-
-    return 0 if state == "TASK_STATE_COMPLETED" else 1
+def _render_artifact(artifact: a2a_pb2.Artifact) -> str:
+    if text := get_artifact_text(artifact):
+        return text
+    return "\n".join(json.dumps(data, indent=2) for data in get_data_parts(artifact.parts))
 
 
 async def _card(base_url: str) -> int:
