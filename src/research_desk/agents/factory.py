@@ -9,10 +9,10 @@ from __future__ import annotations
 import httpx
 from a2a.server.agent_execution import AgentExecutor
 from a2a.types import a2a_pb2
-from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
+from starlette.types import ASGIApp
 
 from research_desk.agents.analyst import AnalystExecutor
 from research_desk.agents.coordinator import CoordinatorExecutor
@@ -25,6 +25,8 @@ from research_desk.logging import bind_agent, get_logger
 from research_desk.protocol.client import PeerClient
 from research_desk.protocol.discovery import AgentRegistry
 from research_desk.protocol.server import build_app
+from research_desk.telemetry import configure_tracing
+from research_desk.ui import UI_INDEX
 
 logger = get_logger(__name__)
 
@@ -40,7 +42,7 @@ def build_agent_app(
     settings: Settings | None = None,
     *,
     http_client: httpx.AsyncClient | None = None,
-) -> Starlette:
+) -> ASGIApp:
     """Assemble the server for one agent.
 
     ``http_client`` is injected by the test suite so that the coordinator's
@@ -50,11 +52,19 @@ def build_agent_app(
     settings = settings or get_settings()
     bind_agent(agent.value)
 
-    card = build_card(agent, settings.public_url_for(agent))
+    tracing = configure_tracing(
+        f"research-desk-{agent.value}",
+        enabled=settings.telemetry_enabled,
+        endpoint=settings.otel_exporter_endpoint,
+    )
+
+    card = build_card(agent, settings.public_url_for(agent), require_api_key=settings.auth_enabled)
     provider = build_provider_for(agent, settings)
 
     if agent is AgentName.COORDINATOR:
-        return _build_coordinator(settings, card=card, planner=provider, http_client=http_client)
+        return _build_coordinator(
+            settings, card=card, planner=provider, http_client=http_client, tracing=tracing
+        )
 
     executor = _SPECIALISTS[agent](
         provider,
@@ -68,9 +78,16 @@ def build_agent_app(
             "agent": agent.value,
             "model": provider.name,
             "url": card.supported_interfaces[0].url,
+            "auth": settings.auth_enabled,
         },
     )
-    return build_app(card=card, executor=executor, on_shutdown=provider.aclose)
+    return build_app(
+        card=card,
+        executor=executor,
+        on_shutdown=provider.aclose,
+        api_key=settings.a2a_api_key,
+        tracing_enabled=tracing,
+    )
 
 
 def _build_coordinator(
@@ -79,7 +96,8 @@ def _build_coordinator(
     card: a2a_pb2.AgentCard,
     planner: LLMProvider,
     http_client: httpx.AsyncClient | None,
-) -> Starlette:
+    tracing: bool,
+) -> ASGIApp:
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(timeout=settings.peer_request_timeout_seconds)
 
@@ -91,7 +109,7 @@ def _build_coordinator(
     )
     executor = CoordinatorExecutor(
         registry=registry,
-        peer_client=PeerClient(client),
+        peer_client=PeerClient(client, api_key=settings.a2a_api_key),
         planner=planner,
     )
 
@@ -105,10 +123,19 @@ def _build_coordinator(
             }
         )
 
+    async def console(_: Request) -> FileResponse:
+        """The live console — itself an A2A client, running in the browser."""
+        return FileResponse(UI_INDEX, media_type="text/html")
+
     async def on_startup() -> None:
         logger.info(
             "coordinator starting",
-            extra={"planner": planner.name, "peers": ",".join(settings.peer_agent_urls)},
+            extra={
+                "planner": planner.name,
+                "peers": ",".join(settings.peer_agent_urls),
+                "auth": settings.auth_enabled,
+                "tracing": tracing,
+            },
         )
         await registry.discover()
 
@@ -120,7 +147,12 @@ def _build_coordinator(
     return build_app(
         card=card,
         executor=executor,
-        extra_routes=[Route("/agents", list_agents, methods=["GET"])],
+        extra_routes=[
+            Route("/agents", list_agents, methods=["GET"]),
+            Route("/ui", console, methods=["GET"]),
+        ],
         on_startup=on_startup,
         on_shutdown=on_shutdown,
+        api_key=settings.a2a_api_key,
+        tracing_enabled=tracing,
     )
