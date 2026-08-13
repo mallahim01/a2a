@@ -1,0 +1,73 @@
+# Four agents, four containers, one shared network — the deployment the A2A
+# protocol is actually for. Each specialist advertises its Docker service name
+# in its agent card, and the coordinator discovers all three at startup.
+#
+#   docker compose up --build
+#   curl http://127.0.0.1:8000/agents
+
+name: research-desk
+
+x-agent: &agent
+  build:
+    context: .
+  image: research-desk:latest
+  # Secrets are injected at run time. The image never contains them, and .env is
+  # excluded from the build context by .dockerignore.
+  env_file:
+    - .env
+  restart: unless-stopped
+  networks: [desk]
+
+services:
+  researcher:
+    <<: *agent
+    container_name: desk-researcher
+    command: ["serve", "researcher"]
+    environment:
+      PORT: 8001
+      PUBLIC_URL: http://researcher:8001/
+
+  analyst:
+    <<: *agent
+    container_name: desk-analyst
+    command: ["serve", "analyst"]
+    environment:
+      PORT: 8002
+      PUBLIC_URL: http://analyst:8002/
+
+  writer:
+    <<: *agent
+    container_name: desk-writer
+    command: ["serve", "writer"]
+    environment:
+      PORT: 8003
+      PUBLIC_URL: http://writer:8003/
+
+  coordinator:
+    <<: *agent
+    container_name: desk-coordinator
+    command: ["serve", "coordinator"]
+    # The only port published to the host: specialists are reachable to each
+    # other, but the desk has a single front door.
+    ports:
+      - "8000:8000"
+    environment:
+      PORT: 8000
+      # An agent card must advertise a URL its *callers* can reach, and the
+      # coordinator's callers are outside the Docker network. Hence the
+      # published host address here, while the specialists — only ever called
+      # from inside — advertise their service names. Change this to the real
+      # hostname when deploying somewhere other than localhost.
+      PUBLIC_URL: http://127.0.0.1:8000/
+      PEER_AGENT_URLS: http://researcher:8001,http://analyst:8002,http://writer:8003
+    depends_on:
+      researcher:
+        condition: service_healthy
+      analyst:
+        condition: service_healthy
+      writer:
+        condition: service_healthy
+
+networks:
+  desk:
+    driver: bridge
