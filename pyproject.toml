@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "research-desk"
+version = "1.0.0"
+description = "A demonstration of the Agent2Agent (A2A) protocol: four independent agents collaborating on a research brief."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "mallahim01" }]
+keywords = ["a2a", "agent2agent", "multi-agent", "llm", "protocol"]
+
+dependencies = [
+    "a2a-sdk[http-server]==1.1.2",
+    "httpx>=0.28",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.4",
+    "uvicorn[standard]>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "respx>=0.22",
+    "ruff>=0.7",
+    "mypy>=1.13",
+]
+
+[project.scripts]
+research-desk = "research_desk.cli:main"
+
+[project.urls]
+Repository = "https://github.com/mallahim01/a2a"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/research_desk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ANN", "S", "BLE", "SLF"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN", "S101", "SLF001"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+strict = true
+warn_return_any = false
+# The A2A SDK's protobuf types resolve to Any, which strict mode would otherwise
+# reject wherever an SDK base class is subclassed (every AgentExecutor).
+disallow_subclassing_any = false
+
+[[tool.mypy.overrides]]
+module = ["a2a.*", "google.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
