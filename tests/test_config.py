@@ -72,6 +72,26 @@ def test_peer_urls_parse_from_the_environment(monkeypatch: pytest.MonkeyPatch) -
     assert Settings().peer_agent_urls == ["http://researcher:8001", "http://analyst:8002"]
 
 
+def test_blank_environment_variables_fall_back_to_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``PORT=`` in a compose file means "unset", not "the empty string"."""
+    monkeypatch.setenv("PORT", "")
+    monkeypatch.setenv("WRITER_MODEL", "   ")
+    monkeypatch.setenv("PEER_AGENT_URLS", "")
+
+    settings = Settings()
+
+    assert settings.port is None
+    assert settings.port_for(AgentName.WRITER) == 8003
+    assert settings.writer_model == "groq:llama-3.3-70b-versatile"
+    assert settings.peer_agent_urls == [
+        "http://127.0.0.1:8001",
+        "http://127.0.0.1:8002",
+        "http://127.0.0.1:8003",
+    ]
+
+
 def test_settings_resolve_entirely_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """The container path: every value arrives as an environment variable."""
     monkeypatch.setenv("PORT", "9100")

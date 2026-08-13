@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Annotated
 
 from dotenv import load_dotenv
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 DEFAULT_ENV_FILE = Path(".env")
@@ -111,6 +111,18 @@ class Settings(BaseSettings):
     # --- Logging ---
     log_level: str = "INFO"
     log_format: str = "console"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_blank_values(cls, values: object) -> object:
+        """Treat an empty environment variable as absent, so the default applies.
+
+        ``PORT=`` in a compose file or CI matrix is common and means "no value",
+        not "the empty string" — without this it is a startup crash.
+        """
+        if not isinstance(values, dict):
+            return values
+        return {k: v for k, v in values.items() if not (isinstance(v, str) and not v.strip())}
 
     @field_validator("peer_agent_urls", mode="before")
     @classmethod
